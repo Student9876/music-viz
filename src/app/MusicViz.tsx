@@ -11,14 +11,21 @@ const MusicViz: React.FC = () => {
 	const [audioFile, setAudioFile] = useState<string | null>(null);
 	const audioRef = useRef<HTMLAudioElement | null>(null);
 	const analyserRef = useRef<AnalyserNode | null>(null);
+	const sceneRef = useRef<THREE.Scene | null>(null);
 	const [isPlaying, setIsPlaying] = useState(false);
 	const [currentTime, setCurrentTime] = useState(0);
 	const [duration, setDuration] = useState(0);
 
+	// Add fileKey to force scene recreation when file changes
+	const [fileKey, setFileKey] = useState(0);
+
 	useEffect(() => {
 		if (!mountRef.current) return;
 
+		// Create scene
 		const scene = new THREE.Scene();
+		sceneRef.current = scene;
+
 		const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 		const renderer = new THREE.WebGLRenderer({antialias: true});
 		renderer.setSize(window.innerWidth, window.innerHeight);
@@ -48,6 +55,7 @@ const MusicViz: React.FC = () => {
 
 		let animationFrameId: number;
 		let rotationAngle = 0;
+
 		const animate = () => {
 			animationFrameId = requestAnimationFrame(animate);
 
@@ -65,6 +73,7 @@ const MusicViz: React.FC = () => {
 
 			renderer.render(scene, camera);
 		};
+
 		animate();
 
 		const handleResize = () => {
@@ -72,6 +81,7 @@ const MusicViz: React.FC = () => {
 			camera.updateProjectionMatrix();
 			renderer.setSize(window.innerWidth, window.innerHeight);
 		};
+
 		window.addEventListener("resize", handleResize);
 
 		return () => {
@@ -80,15 +90,46 @@ const MusicViz: React.FC = () => {
 			if (mountRef.current) {
 				mountRef.current.removeChild(renderer.domElement);
 			}
+
+			// Dispose resources
+			particleSystem.geometry.dispose();
+			(particleSystem.material as THREE.Material).dispose();
+			backgroundSystem.geometry.dispose();
+			(backgroundSystem.material as THREE.Material).dispose();
+
+			// Clear scene
+			scene.clear();
 		};
-	}, []);
+	}, [fileKey]); // Recreate scene when fileKey changes
 
 	const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
 		const file = event.target.files?.[0];
 		if (file) {
+			// Clean up previous audio resources
+			if (audioRef.current) {
+				audioRef.current.pause();
+				audioRef.current.src = "";
+				audioRef.current.load();
+				audioRef.current = null;
+			}
+
+			if (analyserRef.current) {
+				analyserRef.current = null;
+			}
+
+			// Reset state
+			setIsPlaying(false);
+			setCurrentTime(0);
+			setDuration(0);
+
+			// Create new URL for the audio file
 			const url = URL.createObjectURL(file);
 			setAudioFile(url);
-			setIsPlaying(false);
+
+			// Increment file key to force scene recreation
+			setFileKey((prevKey) => prevKey + 1);
+
+			console.log(`New file loaded: ${file.name}`);
 		}
 	};
 
@@ -97,18 +138,35 @@ const MusicViz: React.FC = () => {
 			const audio = new Audio(audioFile);
 			audioRef.current = audio;
 
-			const audioContext = new AudioContext();
-			const source = audioContext.createMediaElementSource(audio);
-			const analyser = audioContext.createAnalyser();
-			analyser.fftSize = 256;
-			source.connect(analyser);
-			analyser.connect(audioContext.destination);
-			analyserRef.current = analyser;
+			// Setup audio context and analyzer
+			try {
+				const audioContext = new AudioContext();
+				const source = audioContext.createMediaElementSource(audio);
+				const analyser = audioContext.createAnalyser();
+				analyser.fftSize = 256;
+				source.connect(analyser);
+				analyser.connect(audioContext.destination);
+				analyserRef.current = analyser;
 
-			audio.addEventListener("loadedmetadata", () => setDuration(audio.duration));
-			audio.addEventListener("timeupdate", () => setCurrentTime(audio.currentTime));
-			audio.addEventListener("ended", () => setIsPlaying(false));
+				// Setup event listeners
+				audio.addEventListener("loadedmetadata", () => setDuration(audio.duration));
+				audio.addEventListener("timeupdate", () => setCurrentTime(audio.currentTime));
+				audio.addEventListener("ended", () => setIsPlaying(false));
+
+				console.log("Audio analyzer initialized");
+			} catch (error) {
+				console.error("Error setting up audio analyzer:", error);
+			}
 		}
+
+		// Clean up function for audio resources
+		return () => {
+			if (audioRef.current) {
+				audioRef.current.removeEventListener("loadedmetadata", () => {});
+				audioRef.current.removeEventListener("timeupdate", () => {});
+				audioRef.current.removeEventListener("ended", () => {});
+			}
+		};
 	}, [audioFile]);
 
 	const togglePlayPause = () => {
@@ -116,7 +174,10 @@ const MusicViz: React.FC = () => {
 			if (isPlaying) {
 				audioRef.current.pause();
 			} else {
-				audioRef.current.play();
+				// Resume from the current position or start from beginning
+				audioRef.current.play().catch((err) => {
+					console.error("Error playing audio:", err);
+				});
 			}
 			setIsPlaying(!isPlaying);
 		}
@@ -137,9 +198,41 @@ const MusicViz: React.FC = () => {
 	};
 
 	return (
-		<div style={{position: "relative", height: "100vh"}}>
-			<input type="file" accept="audio/*" onChange={handleFileChange} style={{position: "absolute", top: 10, left: 10, zIndex: 2}} />
+		<div style={{position: "relative", height: "100vh", background: "#000"}}>
+			{/* File input with improved styling */}
+			<label
+				htmlFor="audio-file"
+				style={{
+					position: "absolute",
+					top: 10,
+					left: 10,
+					zIndex: 2,
+					background: "rgba(0,0,0,0.7)",
+					color: "white",
+					padding: "8px 12px",
+					borderRadius: "4px",
+					cursor: "pointer",
+					border: "1px solid #666",
+				}}>
+				Choose Audio File
+			</label>
+			<input
+				id="audio-file"
+				type="file"
+				accept="audio/*"
+				onChange={handleFileChange}
+				style={{
+					position: "absolute",
+					width: "1px",
+					height: "1px",
+					opacity: 0,
+				}}
+			/>
+
+			{/* Three.js container */}
 			<div ref={mountRef} style={{width: "100vw", height: "100vh"}} />
+
+			{/* Audio controls */}
 			{audioFile && (
 				<div
 					style={{
@@ -159,7 +252,15 @@ const MusicViz: React.FC = () => {
 						boxShadow: "0 4px 10px rgba(0, 0, 0, 0.3)",
 						zIndex: 2,
 					}}>
-					<button onClick={togglePlayPause} style={{background: "none", border: "none", color: "#fff", fontSize: 20, cursor: "pointer"}}>
+					<button
+						onClick={togglePlayPause}
+						style={{
+							background: "none",
+							border: "none",
+							color: "#fff",
+							fontSize: 20,
+							cursor: "pointer",
+						}}>
 						{isPlaying ? "⏸" : "▶"}
 					</button>
 					<div style={{flex: 1, margin: "0 10px"}}>
@@ -170,6 +271,26 @@ const MusicViz: React.FC = () => {
 					</span>
 				</div>
 			)}
+
+			{/* Debug info */}
+			<div
+				style={{
+					position: "absolute",
+					top: 10,
+					right: 10,
+					background: "rgba(0,0,0,0.7)",
+					color: "white",
+					padding: 10,
+					borderRadius: 4,
+					fontSize: 12,
+					fontFamily: "monospace",
+				}}>
+				File: {audioFile ? "Loaded ✅" : "None ❌"}
+				<br />
+				Audio: {isPlaying ? "Playing ▶️" : "Paused ⏸️"}
+				<br />
+				Analysis: {analyserRef.current ? "Active ✅" : "Inactive ❌"}
+			</div>
 		</div>
 	);
 };
